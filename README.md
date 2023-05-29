@@ -1,3 +1,10 @@
+# Project 4 Networks & Distributed Systems, March 2023
+## Description 
+This project was to design a transport protocol akin to TCP. We designed two programs: a sender (3700send), and a receiver (3700recv) that work in tangent to reliably transport data messages, split into packets. Like project 3, this was also run in a simulator, since the
+real Internet is too reliable to be a challenge. Starter code used UDP sockets, with a very slow stop-and-wait protocol, and we used
+elements of various TCP versions in order to improve performance and reliability.
+
+## Approach
 Most of the code in 3700send is contained in the run() function, where for loop continuously loops through the sockets, 
 differentiating between system input, or new packets to be sent, and acks that have been received. Before this happens 
 however, run() checks to make sure that the oldest un-ACKed packet has not been dropped. If it has, then the packet is 
