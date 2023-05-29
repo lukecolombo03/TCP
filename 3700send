@@ -1,0 +1,143 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math, hashlib
+
+DATA_SIZE = 1375
+
+
+# use hashlib to check if two packets have the same data
+# takes in a hashcode and a packet as input
+def check_hashes(recv_hash, our_packet):
+    our_hash = hashlib.sha224(our_packet.get('data').encode()).hexdigest()
+    return recv_hash == our_hash
+
+
+class Sender:
+    def __init__(self, host, port):
+        self.host = host
+        self.remote_port = int(port)
+        self.log("Sender starting up using port %s" % self.remote_port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+        self.in_flight = []  # [data, time]
+        self.window = 2  # how many unACKed packets can be in flight at once
+        self.ssthresh = 6  # slow start threshold
+        # could initialize effective_wnd here?
+        self.seq_num = 0
+        self.fast_counter = 0
+        self.last_acked = -1  # the most recent packet to be ACKed
+        self.waiting = False
+        self.rtt = 1
+
+
+
+    def log(self, message):
+        sys.stderr.write(str(message) + "\n")
+        sys.stderr.flush()
+
+    def send(self, message):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+
+    def run(self):
+        while True:
+            #self.log("window size " + str(self.window) + "ssthresh " + str(self.ssthresh))
+            # TODO: maybe change this to not use self.waiting, just check to see if we have window space
+            sockets = [self.socket] if self.waiting else [self.socket, sys.stdin]
+            socks = select.select(sockets, [], [], 0.1)[0]  # able to read from self.socket and system.in if we're not
+            # waiting, just self.socket if we are waiting
+            if len(self.in_flight) > 0 and time.time() > self.in_flight[0][1] + self.rtt:  # if a packet was dropped
+                self.in_flight[0][1] = time.time()
+                self.better_send(self.in_flight[0][0].get('data'), self.in_flight[0][0].get('sequence'))
+                self.waiting = True
+                self.multiplicitive_decrease()
+            # elif len(self.in_flight) > 0:
+            #     self.rtt = (self.rtt + (time.time() - (self.in_flight[0][1] + self.rtt))) / 2
+
+            for conn in socks:
+                if conn == self.socket:  # Read from receiver
+                    k, addr = conn.recvfrom(65535)
+                    try:
+                        msg_from_receiver = json.loads(k.decode('utf-8'))
+                    except json.decoder.JSONDecodeError:
+                        msg_from_receiver = None
+                    if msg_from_receiver is None:   # drop the packet
+                        continue
+
+                    self.log("Received message '%s'" % msg_from_receiver)
+                    seq_nums_in_flight = [x[0].get('sequence') for x in self.in_flight]
+                    self.log("needed ACKs: " + str(seq_nums_in_flight))
+
+                    ack_num = msg_from_receiver.get('sequence')     # the acknowledgment number we received
+                    if ack_num not in seq_nums_in_flight:   # drop the packet
+                        self.waiting = False
+                        continue
+                    elif ack_num == self.last_acked:  # DUPLICATE ACK - retransmit the corresponding packet
+                        self.log('DUPLICATE')
+                        for entry in self.in_flight:
+                            if entry[0].get('sequence') == ack_num:
+                                self.better_send(entry[0].get('data'), entry[0].get('sequence'))
+                    else:  # filter in_flight so that it only has numbers bigger than ack_num
+                        len_before_filter = 0 + len(self.in_flight)
+                        self.log("SACKs: " + str(msg_from_receiver.get('sack')))
+                        self.in_flight = [x for x in self.in_flight if
+                                          x[0].get('sequence') > ack_num and x != x[0].get('sack')]
+                        len_after_filter = 0 + len(self.in_flight)
+                        for i in range(0, len_before_filter - len_after_filter):
+                            self.slow_start()
+                    self.last_acked = ack_num
+                    self.waiting = False
+
+                elif conn == sys.stdin:  # read from System.in and send to receiver
+                    effective_wnd = self.window - len(self.in_flight)
+                    for i in range(0, effective_wnd):
+                        data = sys.stdin.read(DATA_SIZE)
+                        if len(data) == 0:
+                            if len(self.in_flight) > 0: # could change to if self.in_flight[0] is not None
+                                self.waiting = True
+                                break
+                            else:
+                                self.log("All done!")
+                                sys.exit(0)
+                        self.better_send(data, self.seq_num)
+                        self.log("needed ACKs: " + str([x[0].get('sequence') for x in self.in_flight]))
+                        self.seq_num += 1  # increment sequence number
+                    self.waiting = True
+
+        return
+
+    # given data and a sequence number, turn it into a valid packet and send it
+    # also, append this packet to self.in_flight
+    def better_send(self, data, sequence_number):
+        hash_code = hashlib.sha224(data.encode()).hexdigest()
+        packet = {"type": "msg", "data": data, "sequence": sequence_number, "hash": hash_code}
+        self.send(packet)
+        self.log("Sending message %s" % (packet.get('data')[3:22]))
+        if packet.get('sequence') not in [x[0].get('sequence') for x in self.in_flight]:
+            self.in_flight.append([packet, time.time()])
+
+    # called when a packet dropped due to timeout
+    def multiplicitive_decrease(self):
+        self.ssthresh = int(self.window / 2) + 1
+        self.window = 1
+
+    # if window size is under the threshold, it doubles (slow start), else, it does additive increase
+    def slow_start(self):
+        if self.window < self.ssthresh:
+            self.window *= 2
+        else:
+            self.window += 1
+
+    def fast_retransmit(self):
+        if self.fast_counter == 3:
+            for entry in self.in_flight:
+                self.better_send(entry[0].get('data'), entry[0].get('sequence'))
+            self.fast_counter = 0
+            self.window = int(self.window / 2)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='send data')
+    parser.add_argument('host', type=str, help="Remote host to connect to")
+    parser.add_argument('port', type=int, help="UDP port number to connect to")
+    args = parser.parse_args()
+    sender = Sender(args.host, args.port)
+    sender.run()

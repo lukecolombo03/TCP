@@ -1,0 +1,90 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math, hashlib
+
+
+class Receiver:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+        self.port = self.socket.getsockname()[1]
+        self.log("Bound to port %d" % self.port)
+        self.remote_host = None
+        self.remote_port = None
+        self.done = []  # successfully received in order
+        self.acked = 0  # how many in-order packets we have received
+        self.buffer = []
+
+    def send(self, message):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
+
+    def log(self, message):
+        sys.stderr.write(str(message) + "\n")
+        sys.stderr.flush()
+
+    def run(self):
+        while True:
+            socks = select.select([self.socket], [], [])[0]  # getting readable sockets
+            for conn in socks:
+                data, addr = conn.recvfrom(65535)
+                if self.remote_host is None:    # Grab the remote host/port if we don't already have it
+                    self.remote_host = addr[0]
+                    self.remote_port = addr[1]
+                msg = json.loads(data.decode('utf-8'))
+                if msg is None or msg.get('data') is None:  # sometimes the data is corrupted and becomes None
+                    None
+                else:
+                    self.log("Received data message %s, sequence = %s" %
+                             (msg.get('data')[3:22], msg.get('sequence')))
+
+                    received_hash = msg.get('hash')
+                    our_hash = hashlib.sha224(msg.get('data').encode()).hexdigest()
+
+                    if received_hash != our_hash:
+                        None
+                        #self.log('CORRUPTED')
+                    elif msg in self.buffer or msg in self.done:
+                        None
+                        #self.log("already in buffer or done")
+                    else:
+                        self.buffer.append(msg)
+                        self.log("Buffer before: " + str([x.get('sequence') for x in self.buffer]))
+                        self.buffer.sort(key=lambda name: name.get('sequence'))
+                        self.sort_and_merge_buffer()
+                        self.log("Buffer after: " + str([x.get('sequence') for x in self.buffer]))
+                    sacks = [x.get('sequence') for x in self.buffer]    # just the sequence numbers
+                    self.send({"type": "ack", "sequence": self.get_last_num(), "sack": sacks})
+                    #self.log("sent ACK for packet %s" % self.get_last_num())
+                    self.log("Received in order: " + str(list(map(lambda s: s['sequence'], self.done))))
+        return
+
+    def sort_and_merge_buffer(self):
+        last_num = self.get_last_num()
+        cleared_from_buffer = []
+        for i in range(0, len(self.buffer)):
+            if self.buffer[i].get('sequence') == 1 + last_num:  # if we have a continuous chain from 0 to i, add the
+                # ith packet to received_in_order and ACK it
+                if self.buffer[i] not in self.done and self.buffer[i] is not None:
+                    self.done.append(self.buffer[i])
+                    print(self.buffer[i].get("data"), end='', flush=True)
+                    last_num += 1
+                    cleared_from_buffer.append(self.buffer[i])
+            else:
+                break
+        for x in cleared_from_buffer:
+            self.buffer.remove(x)
+
+    def get_last_num(self):
+        try:  # last_num is the last sequence number successfully received
+            last_num = self.done[-1].get('sequence')
+        except IndexError:
+            last_num = -1
+        return last_num
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='receive data')
+    args = parser.parse_args()
+    sender = Receiver()
+    sender.run()
+
