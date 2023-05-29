@@ -1,4 +1,4 @@
-# Project 4 Networks & Distributed Systems, March 2023
+# Project 4 for CS3700, March 2023
 ## Description 
 This project was to design a transport protocol akin to TCP. We designed two programs: a sender (3700send), and a receiver (3700recv) that work in tangent to reliably transport data messages, split into packets. Like project 3, this was also run in a simulator, since the
 real Internet is too reliable to be a challenge. Starter code used UDP sockets, with a very slow stop-and-wait protocol, and we used
